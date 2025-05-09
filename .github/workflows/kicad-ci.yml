@@ -42,7 +42,7 @@
   
       steps:
         - name: Checkout repository
-          uses: actions/checkout@v3
+          uses: actions/checkout@v4
   
         - name: Common container setup
           run: |
@@ -116,7 +116,7 @@
   
         - name: Upload raw DRC JSON reports
           if: ${{ !env.ACT }}
-          uses: actions/upload-artifact@v3
+          uses: actions/upload-artifact@v4
           with:
             name: drc-reports-${{ steps.sha.outputs.SHORT_SHA }}
             path: ./outputs/drc
@@ -144,7 +144,7 @@
   
       steps:
         - name: Checkout repository
-          uses: actions/checkout@v3
+          uses: actions/checkout@v4
   
         - name: Common container setup
           run: |
@@ -321,7 +321,7 @@
             cd ..
   
         - name: Upload artefacts (so other jobs & users can download them)
-          uses: actions/upload-artifact@v3
+          uses: actions/upload-artifact@v4
           with:
             name: files-${{ steps.sha.outputs.SHORT_SHA }}
             path: |
@@ -350,7 +350,7 @@
   
       steps:
         - name: Checkout repository
-          uses: actions/checkout@v3
+          uses: actions/checkout@v4
   
         - name: Download build artefacts
           uses: actions/download-artifact@v4
@@ -441,7 +441,7 @@
   
       steps:
         - name: Checkout repository
-          uses: actions/checkout@v3
+          uses: actions/checkout@v4
   
         - name: Setup Python
           uses: actions/setup-python@v4
