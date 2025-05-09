@@ -1,0 +1,7 @@
+/fp-info-cache
+/Fan_Controller-backups
+/Fan_Controller.outputs
+/Fan_Controller.bak
+Fan_Controller.kicad_prl
+*.lck
+_autosave*

@@ -1,0 +1,414 @@
+name: KiCad PCB CI
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '*.md'
+      - 'LICENSE'
+      - 'docs/**'
+
+
+env:
+  PROJECT_NAME: Fan_Controller
+
+jobs:
+  drc-check:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.drc-results.outputs.proceed }}
+    container:
+      image: kicad/kicad:9.0-full
+      options: --user root
+
+    steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq protobuf-compiler
+
+      - name: Checkout Repository
+        uses: actions/checkout@master
+
+      - name: Set Short SHA
+        id: short-sha
+        run: echo "SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Replace Library Tables
+        run: |
+          rm ./fp-lib-table ./sym-lib-table
+          cp .github/workflows/kicad-conf/gh-fp-lib-table ./fp-lib-table
+          cp .github/workflows/kicad-conf/gh-sym-lib-table ./sym-lib-table
+
+      - name: Run DRC and Capture Output
+        id: drc
+        shell: bash
+        run: |
+          mkdir -p outputs/drc
+          for severity in "all" "error" "warning" "exclusions"; do
+            echo "::group::Running DRC with severity $severity"
+            OUTPUT=$(kicad-cli pcb drc -o "outputs/drc/${{ env.PROJECT_NAME }}-drc-report-${severity}.json" \
+                                       --format json --schematic-parity --severity-${severity} \
+                                       -D BRANCH=${GITHUB_REF#refs/heads/} \
+                                       -D SHORT_SHA=${{ steps.short-sha.outputs.SHORT_SHA }} \
+                                       -D LONG_SHA=$GITHUB_SHA \
+                                       -D IS_CI=1 \
+                                       ./${{ env.PROJECT_NAME }}.kicad_pcb)
+            echo "$OUTPUT"
+            echo "::endgroup::"
+            SINGLE_LINE_OUTPUT=$(echo "$OUTPUT" | tr '\n' ',')
+            echo "DRC_OUTPUT_${severity^^}=$SINGLE_LINE_OUTPUT" >> $GITHUB_OUTPUT
+          done
+
+      - name: Analyze DRC Results and Decide Next Steps
+        id: drc-results
+        run: |
+          output="${{ steps.drc.outputs.DRC_OUTPUT_ERROR }}"
+          violations=$(echo $output | grep -oP 'Found \K[0-9]+(?= violations)')
+          unconnected_items=$(echo $output | grep -oP 'Found \K[0-9]+(?= unconnected items)')
+          schematic_issues=$(echo "$output" | grep -oP 'Found \K[0-9]+(?= schematic parity issues)')
+          echo "::info ::Violations: $violations"
+          echo "::info ::Unconnected Items: $unconnected_items"
+          echo "::info ::Schematic Parity Issues: $schematic_issues"
+          if [ "$violations" -ne 0 ] || [ "$unconnected_items" -ne 0 ] || [ "$schematic_issues" -ne 0 ]; then
+            echo "PROCEED=false" >> $GITHUB_OUTPUT
+            echo "::error ::Errors found in the DRC report, please check the report for more details."
+          else
+            echo "PROCEED=true" >> $GITHUB_OUTPUT
+            echo "::info ::No errors found in the DRC report."
+          fi
+
+      - name: Parse DRC Report and Create Warnings
+        run: |
+          jq -c '.violations[]' "outputs/drc/${{ env.PROJECT_NAME }}-drc-report-all.json" | while read -r violation; do
+            description=$(echo $violation | jq -r '.description')
+            severity=$(echo $violation | jq -r '.severity')
+            items=$(echo $violation | jq -r '.items[].description' | paste -sd ", ")
+            echo "::notice::$severity - $description: $items"
+          done
+
+      - name: Upload DRC Reports
+        uses: actions/upload-artifact@master
+        with:
+          name: drc-reports-${{ steps.short-sha.outputs.SHORT_SHA }}
+          path: ./outputs/drc
+
+  export-files:
+    needs: drc-check
+    permissions:
+      contents: write
+      packages: write
+    if: needs.drc-check.outputs.PROCEED == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: kicad/kicad:8.0
+      options: --user root
+
+    steps:
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler inkscape imagemagick curl jq
+
+      - name: Checkout Repository
+        uses: actions/checkout@master
+        with:
+          fetch-depth: 0
+
+      - name: Set Short SHA
+        id: short-sha
+        run: |
+          echo "SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+          echo "LONG_SHA=$GITHUB_SHA" >> $GITHUB_OUTPUT
+
+      - name: Set Timezone to Asia/Shanghai
+        run: |
+          sudo ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+          sudo echo "Asia/Shanghai" > /etc/timezone
+
+      - name: Replace Library Tables
+        run: |
+          rm ./fp-lib-table ./sym-lib-table
+          cp .github/workflows/kicad-conf/gh-fp-lib-table ./fp-lib-table
+          cp .github/workflows/kicad-conf/gh-sym-lib-table ./sym-lib-table
+
+      - name: Export Files (Gerber, Drill, Position, STEP, VRML, Netlist)
+        shell: bash
+        run: |
+          mkdir -p outputs/{gerber,pnp,step,vrml,bom,netlist,schematic,svg,bom,png}
+
+          kicad-cli pcb export gerbers -o "outputs/gerber/" --board-plot-params \
+                                       -D BRANCH=${GITHUB_REF#refs/heads/} \
+                                       -D SHORT_SHA=${{ steps.short-sha.outputs.SHORT_SHA }} \
+                                       -D LONG_SHA=$GITHUB_SHA \
+                                       -D IS_CI=1 ./${{ env.PROJECT_NAME }}.kicad_pcb
+
+          kicad-cli pcb export drill -o "outputs/gerber/" --format excellon --excellon-separate-th --generate-map ./${{ env.PROJECT_NAME }}.kicad_pcb
+
+          kicad-cli pcb export pos -o "outputs/pnp/${{ env.PROJECT_NAME }}-top-pos.csv" \
+                                   --side front \
+                                   --format csv \
+                                   --units mm \
+                                   --exclude-dnp \
+                                   ./${{ env.PROJECT_NAME }}.kicad_pcb
+
+          kicad-cli pcb export pos -o "outputs/pnp/${{ env.PROJECT_NAME }}-bottom-pos.csv" \
+                                   --side back \
+                                   --format csv \
+                                   --units mm \
+                                   --exclude-dnp \
+                                   ./${{ env.PROJECT_NAME }}.kicad_pcb
+
+          kicad-cli pcb export step -o "outputs/step/${{ env.PROJECT_NAME }}.step" --no-dnp --subst-models --include-tracks --include-zones \
+                                    -D BRANCH=${GITHUB_REF#refs/heads/} \
+                                    -D SHORT_SHA=${{ steps.short-sha.outputs.SHORT_SHA }} \
+                                    -D LONG_SHA=$GITHUB_SHA \
+                                    -D IS_CI=1 \
+                                    ./${{ env.PROJECT_NAME }}.kicad_pcb
+
+          kicad-cli pcb export vrml -o "outputs/vrml/${{ env.PROJECT_NAME }}.wrl" \
+                                    --units mm \
+                                    --models-dir "${{ env.PROJECT_NAME }}.wrl.modules" \
+                                    --models-relative \
+                                    -D BRANCH=${GITHUB_REF#refs/heads/} \
+                                    -D SHORT_SHA=${{ steps.short-sha.outputs.SHORT_SHA }} \
+                                    -D LONG_SHA=$GITHUB_SHA \
+                                    -D IS_CI=1 \
+                                    ./${{ env.PROJECT_NAME }}.kicad_pcb
+
+          for layer in "F.Silkscreen" "F.Paste" "F.Mask" "F.Fab" "F.Cu"; do
+              kicad-cli pcb export svg -o "outputs/svg/${{ env.PROJECT_NAME }}-${layer}.svg" \
+                                      --page-size-mode 2 \
+                                      --layers "$layer" \
+                                      -D BRANCH=${GITHUB_REF#refs/heads/} \
+                                      -D SHORT_SHA=${{ steps.short-sha.outputs.SHORT_SHA }} \
+                                      -D LONG_SHA=$GITHUB_SHA \
+                                      -D IS_CI=1 \
+                                      ./${{ env.PROJECT_NAME }}.kicad_pcb
+          done
+
+          for layer in "B.Silkscreen" "B.Paste" "B.Mask" "B.Fab" "B.Cu"; do
+              kicad-cli pcb export svg -o "outputs/svg/${{ env.PROJECT_NAME }}-${layer}.svg" \
+                                      --page-size-mode 2 \
+                                      --mirror \
+                                      --layers "$layer" \
+                                      -D BRANCH=${GITHUB_REF#refs/heads/} \
+                                      -D SHORT_SHA=${{ steps.short-sha.outputs.SHORT_SHA }} \
+                                      -D LONG_SHA=$GITHUB_SHA \
+                                      -D IS_CI=1 \
+                                      ./${{ env.PROJECT_NAME }}.kicad_pcb
+          done
+
+          kicad-cli pcb export svg -o "outputs/svg/${{ env.PROJECT_NAME }}-Edge.Cuts.svg" \
+                                  --page-size-mode 2 \
+                                  --layers "Edge.Cuts" \
+                                  -D BRANCH=${GITHUB_REF#refs/heads/} \
+                                  -D SHORT_SHA=${{ steps.short-sha.outputs.SHORT_SHA }} \
+                                  -D LONG_SHA=$GITHUB_SHA \
+                                  -D IS_CI=1 \
+                                  ./${{ env.PROJECT_NAME }}.kicad_pcb
+
+          kicad-cli pcb export svg -o "outputs/svg/${{ env.PROJECT_NAME }}-Edge.Cuts-mirrored.svg" \
+                                  --page-size-mode 2 \
+                                  --mirror \
+                                  --layers "Edge.Cuts" \
+                                  -D BRANCH=${GITHUB_REF#refs/heads/} \
+                                  -D SHORT_SHA=${{ steps.short-sha.outputs.SHORT_SHA }} \
+                                  -D LONG_SHA=$GITHUB_SHA \
+                                  -D IS_CI=1 \
+                                  ./${{ env.PROJECT_NAME }}.kicad_pcb   
+
+          kicad-cli sch export netlist -o "outputs/netlist/${{ env.PROJECT_NAME }}.kicadsexpr.net" --format kicadsexpr ./${{ env.PROJECT_NAME }}.kicad_sch
+
+          kicad-cli sch export netlist -o "outputs/netlist/${{ env.PROJECT_NAME }}.kicadxml.net" --format kicadxml ./${{ env.PROJECT_NAME }}.kicad_sch
+
+          kicad-cli sch export pdf -o "outputs/schematic/${{ env.PROJECT_NAME }}-schematic.pdf" -n ./${{ env.PROJECT_NAME }}.kicad_sch
+
+          kicad-cli sch export bom -o "outputs/bom/${{ env.PROJECT_NAME }}-bom.csv" \
+                                   --format-preset CSV \
+                                   --fields "Reference,Value,Footprint,${QUANTITY},Notes,${DNP}" \
+                                   --labels "Refs,Value,Footprint,Qty,Note,DNP" \
+                                   --group-by "Reference,Value,Footprint,${DNP}" \
+                                   ./${{ env.PROJECT_NAME }}.kicad_sch
+
+      - name: Process Images
+        shell: bash
+        run: |
+          for svg in $(ls ./outputs/svg/*.svg); do
+            inkscape --export-filename ./outputs/png/$(basename $svg .svg).png --export-dpi 960 $svg
+          done
+
+          # stack top images
+          convert \( ./outputs/png/${{ env.PROJECT_NAME }}-F.Cu.png -alpha set -channel A -evaluate multiply 1.0 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-F.Mask.png -alpha set -channel A -evaluate multiply 0.4 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-F.Paste.png -alpha set -channel A -evaluate multiply 0.4 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-F.Silkscreen.png -alpha set -channel A -evaluate multiply 0.95 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-F.Fab.png -alpha set -channel A -evaluate multiply 0.95 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-Edge.Cuts.png -alpha set -channel A -evaluate multiply 1.0 \) \
+                  -background none -layers merge +repage ./outputs/png/${{ env.PROJECT_NAME }}-top.png
+
+          # stack bottom images
+          convert \( ./outputs/png/${{ env.PROJECT_NAME }}-B.Cu.png -alpha set -channel A -evaluate multiply 1.0 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-B.Mask.png -alpha set -channel A -evaluate multiply 0.4 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-B.Paste.png -alpha set -channel A -evaluate multiply 0.4 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-B.Silkscreen.png -alpha set -channel A -evaluate multiply 0.9 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-B.Fab.png -alpha set -channel A -evaluate multiply 0.95 \) \
+                  \( ./outputs/png/${{ env.PROJECT_NAME }}-Edge.Cuts-mirrored.png -alpha set -channel A -evaluate multiply 1.0 \) \
+                  -background none -layers merge ./outputs/png/${{ env.PROJECT_NAME }}-bottom.png
+
+          inkscape --export-filename ./outputs/png/${{ env.PROJECT_NAME }}-schematic.png --export-dpi 384 ./outputs/schematic/${{ env.PROJECT_NAME }}-schematic.pdf
+
+      - name: Upload Images to imgur
+        id: upload-images
+        shell: bash
+        run: |
+          API_URL="https://api.imgur.com/3/image"
+          IMAGE_FILES=("./outputs/png/${{ env.PROJECT_NAME }}-top.png"\
+                       "./outputs/png/${{ env.PROJECT_NAME }}-bottom.png"\
+                       "./outputs/png/${{ env.PROJECT_NAME }}-schematic.png")
+          IMAGE_URLS=()
+
+          for IMAGE in "${IMAGE_FILES[@]}"; do
+            echo "Uploading $IMAGE to Imgur..."
+            RESPONSE=$(curl --location "$API_URL" \
+                            --header 'Authorization: Client-ID ${{ secrets.IMGUR_CLIENT_ID }}' \
+                            --form "image=@\"$IMAGE\"" \
+                            --form 'type="image"' \
+                            --form 'title="Image"' \
+                            --form 'description="This is a upload from Github Workflow"')
+            # echo $RESPONSE
+            IMAGE_URL=$(echo $RESPONSE | jq -r '.data.link')
+            IMAGE_URLS+=("\"$IMAGE_URL\"")
+            echo "Image uploaded: $IMAGE_URL"
+          done
+          IMAGE_URLS_JSON=$(printf "[%s]" "$(IFS=,; echo "${IMAGE_URLS[*]}")")
+          echo "image_urls=$IMAGE_URLS_JSON" >> $GITHUB_OUTPUT
+
+      - name: Upload Files (Gerber, Position, STEP, VRML, Netlist, Schematic)
+        uses: actions/upload-artifact@master
+        with:
+          name: files-${{ steps.short-sha.outputs.SHORT_SHA }}
+          path: |
+            ./outputs/gerber
+            ./outputs/pnp
+            ./outputs/step
+            ./outputs/vrml
+            ./outputs/netlist
+            ./outputs/schematic/${{ env.PROJECT_NAME }}-schematic.pdf
+            ./outputs/svg
+            ./outputs/png
+            ./outputs/bom/${{ env.PROJECT_NAME }}-bom.csv
+
+      - name: Zip and rename files
+        run: |
+          cd ./outputs
+          zip -r ./Gerber-${{ steps.short-sha.outputs.SHORT_SHA }}.zip ./gerber
+          zip -r ./PNP-${{ steps.short-sha.outputs.SHORT_SHA }}.zip ./pnp
+          zip -r ./STEP-${{ steps.short-sha.outputs.SHORT_SHA }}.zip ./step
+          zip -r ./VRML-${{ steps.short-sha.outputs.SHORT_SHA }}.zip ./vrml
+          zip -r ./Netlist-${{ steps.short-sha.outputs.SHORT_SHA }}.zip ./netlist
+          cp ./schematic/${{ env.PROJECT_NAME }}-schematic.pdf ./Schematic-${{ steps.short-sha.outputs.SHORT_SHA }}.pdf
+          cp ./bom/${{ env.PROJECT_NAME }}-bom.csv ./BOM-${{ steps.short-sha.outputs.SHORT_SHA }}.csv
+          cd ..
+
+      - name: Calculate tag
+        id: calculate-tag
+        shell: bash
+        run: |
+          git config --global --add safe.directory $(pwd)
+          tags=$(git tag -l "ci-build-*")
+          echo "Tags found: $tags"
+          if [ -z "$tags" ]; then
+            latest_tag="ci-build-0000"
+          else
+            latest_tag=$(echo "$tags" | sort -V | tail -n 1)
+          fi
+          echo "Latest tag is $latest_tag"
+          next_tag=$(printf "ci-build-%04d" $((${latest_tag//ci-build-/} + 1)))
+          echo "Next tag is $next_tag"
+          echo "LAST_TAG=$latest_tag" >> $GITHUB_OUTPUT
+          echo "NEXT_TAG_NUMBER=$((${latest_tag//ci-build-/} + 1))" >> $GITHUB_OUTPUT
+          echo "NEXT_TAG=$next_tag" >> $GITHUB_OUTPUT
+
+      - name: Create tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/${{ steps.calculate-tag.outputs.NEXT_TAG }}',
+              sha: context.sha
+            })
+
+      - name: Create Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          name: "CI Build #${{ steps.calculate-tag.outputs.NEXT_TAG_NUMBER }}"
+          tag_name: ${{ steps.calculate-tag.outputs.NEXT_TAG }}
+          body: |
+            This is an automated build from the CI pipeline. Use the files below at your own risk.
+
+            On commit: ${{ steps.short-sha.outputs.LONG_SHA }}
+
+            ### Images
+
+            ![Top Layer](${{fromJSON(steps.upload-images.outputs.IMAGE_URLS)[0]}})
+
+            ![Bottom Layer](${{fromJSON(steps.upload-images.outputs.IMAGE_URLS)[1]}})
+
+            ![Schematic](${{fromJSON(steps.upload-images.outputs.IMAGE_URLS)[2]}})
+
+          draft: false
+          prerelease: true
+          files: |
+            ./outputs/Gerber-${{ steps.short-sha.outputs.SHORT_SHA }}.zip
+            ./outputs/PNP-${{ steps.short-sha.outputs.SHORT_SHA }}.zip
+            ./outputs/STEP-${{ steps.short-sha.outputs.SHORT_SHA }}.zip
+            ./outputs/VRML-${{ steps.short-sha.outputs.SHORT_SHA }}.zip
+            ./outputs/Netlist-${{ steps.short-sha.outputs.SHORT_SHA }}.zip
+            ./outputs/Schematic-${{ steps.short-sha.outputs.SHORT_SHA }}.pdf
+            ./outputs/BOM-${{ steps.short-sha.outputs.SHORT_SHA }}.csv
+
+  generate-jlc-gerber:
+    needs:
+      - export-files
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@master
+        with:
+          python-version: "3.x"
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Checkout Repository
+        uses: actions/checkout@master
+
+      - name: Set short SHA
+        id: short-sha
+        run: echo "SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      - name: Download Gerber Files
+        uses: actions/download-artifact@master
+        with:
+          name: files-${{ steps.short-sha.outputs.SHORT_SHA }}
+          path: files
+
+      - name: Process Gerber for JLCPCB
+        run: |
+          mkdir -p ./jlc-gerber
+          python .github/workflows/FuckJLC/modify.py -i $(pwd)/files/gerber -o $(pwd)/jlc-gerber
+
+      - name: Upload JLC Gerber Files
+        uses: actions/upload-artifact@master
+        with:
+          name: jlc-gerber-${{ steps.short-sha.outputs.SHORT_SHA }}
+          path: ./jlc-gerber
