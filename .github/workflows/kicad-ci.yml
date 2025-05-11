@@ -415,7 +415,10 @@
             zip -r "release-files/STEP-${{ needs.package-files.outputs.SHORT_SHA }}.zip" release-files/step
             zip -r "release-files/VRML-${{ needs.package-files.outputs.SHORT_SHA }}.zip" release-files/vrml
             zip -r "release-files/Netlist-${{ needs.package-files.outputs.SHORT_SHA }}.zip" release-files/netlist
-  
+            # Rename the schematic PDF and BOM CSV to include the commit SHA
+            mv "./release-files/schematic/${{ env.PROJECT_NAME }}-schematic.pdf" "./release-files/Schematic-${{ needs.package-files.outputs.SHORT_SHA }}.pdf"
+            mv "./release-files/bom/${{ env.PROJECT_NAME }}-bom.csv" "./release-files/BOM-${{ needs.package-files.outputs.SHORT_SHA }}.csv"
+        
         - name: Publish GitHub pre-release
           uses: softprops/action-gh-release@v2
           with:
@@ -425,7 +428,9 @@
             draft: false
             prerelease: true
             body: |
-              Automated build artefacts for commit `${{ github.sha }}`.
+              This is an automated build from the CI pipeline. Use the files below at your own risk.
+              
+              On commit: ${{ github.sha }}
   
               ### Previews
               ![Top Layer](${{ fromJSON(steps.upload-images.outputs.IMAGE_URLS)[0] }})
