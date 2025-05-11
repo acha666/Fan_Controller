@@ -94,15 +94,15 @@
             violations=$(echo $output | grep -oP 'Found \K[0-9]+(?= violations)')
             unconnected_items=$(echo $output | grep -oP 'Found \K[0-9]+(?= unconnected items)')
             schematic_issues=$(echo "$output" | grep -oP 'Found \K[0-9]+(?= schematic parity issues)')
-            echo "::info ::Violations: $violations"
-            echo "::info ::Unconnected Items: $unconnected_items"
-            echo "::info ::Schematic Parity Issues: $schematic_issues"
+            echo "::info::Violations: $violations"
+            echo "::info::Unconnected Items: $unconnected_items"
+            echo "::info::Schematic Parity Issues: $schematic_issues"
             if [ "$violations" -ne 0 ] || [ "$unconnected_items" -ne 0 ] || [ "$schematic_issues" -ne 0 ]; then
               echo "PROCEED=false" >> $GITHUB_OUTPUT
-              echo "::error ::Errors found in the DRC report, please check the report for more details."
+              echo "::error::Errors found in the DRC report, please check the report for more details."
             else
               echo "PROCEED=true" >> $GITHUB_OUTPUT
-              echo "::info ::No errors found in the DRC report."
+              echo "::info::No errors found in the DRC report."
             fi
   
         - name: Emit DRC warnings as GitHub annotations (soft-fail)
@@ -179,8 +179,11 @@
             kicad-cli pcb export drill \
               -o "outputs/gerber/" \
               --format excellon \
+              --drill-origin "absolute" \
+              --excellon-units "mm" \
               --excellon-separate-th \
               --generate-map \
+              --map-format "gerberx2" \
               ./${{ env.PROJECT_NAME }}.kicad_pcb
   
             # ─── PICK&PLACE (component positions) ───────────────────────────────────────────────
@@ -197,7 +200,12 @@
             # ─── 3D MODELS ─────────────────────────────────────────────────────────────────────
             kicad-cli pcb export step \
               -o "outputs/step/${{ env.PROJECT_NAME }}.step" \
-              --no-dnp --subst-models --include-tracks --include-zones \
+              --no-dnp \
+              --subst-models \
+              --include-tracks \
+              --include-zones \
+              --include-silkscreen \
+              --include-soldermask \
               -D BRANCH=${GITHUB_REF#refs/heads/} \
               -D SHORT_SHA=${{ steps.sha.outputs.SHORT_SHA }} \
               -D LONG_SHA=${{ steps.sha.outputs.LONG_SHA }} \
@@ -308,30 +316,20 @@
             # Down-scale the schematic PDF for a quick preview ----------------------------------
             inkscape --export-filename outputs/png/${{ env.PROJECT_NAME }}-schematic.png --export-dpi 384 outputs/schematic/${{ env.PROJECT_NAME }}-schematic.pdf
   
-        - name: Zip logical groups of files for distribution
-          run: |
-            cd outputs
-            zip -r Gerber-${{ steps.sha.outputs.SHORT_SHA }}.zip   gerber
-            zip -r PNP-${{ steps.sha.outputs.SHORT_SHA }}.zip      pnp
-            zip -r STEP-${{ steps.sha.outputs.SHORT_SHA }}.zip     step
-            zip -r VRML-${{ steps.sha.outputs.SHORT_SHA }}.zip     vrml
-            zip -r Netlist-${{ steps.sha.outputs.SHORT_SHA }}.zip  netlist
-            cp schematic/${{ env.PROJECT_NAME }}-schematic.pdf Schematic-${{ steps.sha.outputs.SHORT_SHA }}.pdf
-            cp bom/${{ env.PROJECT_NAME }}-bom.csv             BOM-${{ steps.sha.outputs.SHORT_SHA }}.csv
-            cd ..
-  
-        - name: Upload artefacts (so other jobs & users can download them)
+        - name: Upload artifacts # so other jobs & users can download them
+          if: ${{ !env.ACT }}
           uses: actions/upload-artifact@v4
           with:
             name: files-${{ steps.sha.outputs.SHORT_SHA }}
             path: |
-              ./outputs/Gerber-${{ steps.sha.outputs.SHORT_SHA }}.zip
-              ./outputs/PNP-${{ steps.sha.outputs.SHORT_SHA }}.zip
-              ./outputs/STEP-${{ steps.sha.outputs.SHORT_SHA }}.zip
-              ./outputs/VRML-${{ steps.sha.outputs.SHORT_SHA }}.zip
-              ./outputs/Netlist-${{ steps.sha.outputs.SHORT_SHA }}.zip
-              ./outputs/Schematic-${{ steps.sha.outputs.SHORT_SHA }}.pdf
-              ./outputs/BOM-${{ steps.sha.outputs.SHORT_SHA }}.csv
+              ./outputs/gerber
+              ./outputs/pnp
+              ./outputs/step
+              ./outputs/vrml
+              ./outputs/netlist
+              ./outputs/svg
+              ./outputs/schematic/${{ env.PROJECT_NAME }}-schematic.pdf
+              ./outputs/bom/${{ env.PROJECT_NAME }}-bom.csv
               ./outputs/png
   
       # Expose SHORT_SHA to downstream jobs (handy for artefact naming)
@@ -358,7 +356,7 @@
             name: files-${{ needs.package-files.outputs.SHORT_SHA }}
             path: release-files
   
-        - name: Upload images to Imgur (used in release body)
+        - name: Upload images to Imgur # used in release body
           id: upload-images
           run: |
             sudo apt-get update && sudo apt-get install -y jq curl
@@ -406,6 +404,15 @@
                 ref: 'refs/tags/${{ steps.calculate-tag.outputs.NEXT_TAG }}',
                 sha: context.sha
               })
+        
+        - name: Zip up all files
+          run: |
+            # Zip up all the files for download
+            zip -r "release-files/Gerber-${{ needs.package-files.outputs.SHORT_SHA }}.zip" release-files/gerber
+            zip -r "release-files/PNP-${{ needs.package-files.outputs.SHORT_SHA }}.zip" release-files/pnp
+            zip -r "release-files/STEP-${{ needs.package-files.outputs.SHORT_SHA }}.zip" release-files/step
+            zip -r "release-files/VRML-${{ needs.package-files.outputs.SHORT_SHA }}.zip" release-files/vrml
+            zip -r "release-files/Netlist-${{ needs.package-files.outputs.SHORT_SHA }}.zip" release-files/netlist
   
         - name: Publish GitHub pre-release
           uses: softprops/action-gh-release@v2
@@ -442,6 +449,15 @@
       steps:
         - name: Checkout repository
           uses: actions/checkout@v4
+          with:
+            path: ${{ github.event.repository.name }}
+        
+        - name: Checkout FuckJLC
+          uses: actions/checkout@v4
+          with:
+            repository: "acha666/FuckJLC"
+            ref: "1b7419c317f4a73691a7c206f0408bb915f3b28d"
+            path: FuckJLC
   
         - name: Setup Python
           uses: actions/setup-python@v4
@@ -460,7 +476,7 @@
         - name: Prepare JLC-PCB compatible archive
           run: |
             mkdir -p jlc-gerber
-            python .github/workflows/FuckJLC/modify.py -i "$(pwd)/files/gerber" -o "$(pwd)/jlc-gerber"
+            python ./FuckJLC/modify.py -i "$(pwd)/files/gerber" -o "$(pwd)/jlc-gerber" -r ./FuckJLC/rules/rule-kicad-excellon.yml
   
         - name: Upload JLC Gerber files
           uses: actions/upload-artifact@v4
