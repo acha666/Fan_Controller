@@ -349,6 +349,8 @@
       steps:
         - name: Checkout repository
           uses: actions/checkout@v4
+          with:
+            fetch-depth: 0
   
         - name: Download build artefacts
           uses: actions/download-artifact@v4
@@ -476,7 +478,12 @@
         - name: Prepare JLC-PCB compatible archive
           run: |
             mkdir -p jlc-gerber
-            python ./FuckJLC/modify.py -i "$(pwd)/files/gerber" -o "$(pwd)/jlc-gerber" -r ./FuckJLC/rules/rule-kicad-excellon.yml
+            python ./FuckJLC/modify.py \
+              -i "$(pwd)/files/gerber" \
+              -o "$(pwd)/jlc-gerber" \
+              -r ./FuckJLC/rules/rule-kicad-excellon.yml \
+              -c ./FuckJLC/config.yml \
+              -d ./FuckJLC/filetype_defaults.yml
   
         - name: Upload JLC Gerber files
           uses: actions/upload-artifact@v4
