@@ -56,6 +56,11 @@
           "gap": 0.0,
           "via_gap": 0.0,
           "width": 0.0
+        },
+        {
+          "gap": 0.45,
+          "via_gap": 0.0,
+          "width": 0.12
         }
       ],
       "drc_exclusions": [
@@ -64,7 +69,7 @@
           ""
         ],
         [
-          "silk_over_copper|117683231|86408989|1e05f0d8-e2b6-419f-9989-2c9c9dffd78c|00000000-0000-0000-0000-000000000000",
+          "silk_over_copper|113554949|86667105|1e05f0d8-e2b6-419f-9989-2c9c9dffd78c|00000000-0000-0000-0000-000000000000",
           ""
         ]
       ],
@@ -488,9 +493,9 @@
       {
         "bus_width": 12,
         "clearance": 0.12,
-        "diff_pair_gap": 0.25,
+        "diff_pair_gap": 0.12,
         "diff_pair_via_gap": 0.25,
-        "diff_pair_width": 0.2,
+        "diff_pair_width": 0.12,
         "line_style": 0,
         "microvia_diameter": 0.3,
         "microvia_drill": 0.1,
